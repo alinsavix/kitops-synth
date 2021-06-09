@@ -15,7 +15,7 @@ bl_info = {
     'name': 'KIT OPS SYNTH',
     'author': 'Chipp Walters, MX2, Mark Kingsnorth',
     "blender" : (2, 80, 0),
-    "version" : (1, 0, 0),
+    "version" : (1, 1, 4),
     'location': 'View3D > Toolshelf (T)',
     'description': 'Add multiple KIT OPS INSERTS to your mesh',
     'wiki_url': '',

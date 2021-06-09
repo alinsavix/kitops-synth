@@ -2,7 +2,9 @@
 import json
 from . import distributors
 from .. property import kitops_synth
+from kitops.addon.utility import addon as kitops_addon
 import uuid
+
 
 def as_recipe(dct):
      if '__recipe__' in dct:
@@ -79,10 +81,26 @@ def _decode_inserts(insertsJSON, layer):
         insert.is_enabled               = insertJSON['is_enabled']
         insert.is_expanded              = insert.is_enabled
         try:
-            if 'category' in insertJSON and insertJSON['category']:
-                insert.category                 = insertJSON['category']
-            if 'insert_name' in insertJSON and insertJSON['insert_name']:
-                insert.insert_name              = insertJSON['insert_name']
+            option = kitops_addon.option()
+            found = False
+            if ('category' in insertJSON and insertJSON['category']) and \
+                ('insert_name' in insertJSON and insertJSON['insert_name']):
+                category_name                 = insertJSON['category']
+                insert_name                   = insertJSON['insert_name']
+                for category in option.kpack.categories:
+                    if category.name == category_name and insert_name in category.blends:
+                        insert.category                 = category_name
+                        insert.insert_name              = insert_name
+                        found = True
+                        break
+            if not found and len(option.kpack.categories) and len(option.kpack.categories[0].blends):
+                # if we didn't find anything, just set to the first category and insert entry.
+                insert.category = option.kpack.categories[0].name
+                insert.insert_name = option.kpack.categories[0].blends[0].name
+                # if the insert is enabled, we'll assume it was expected so propogate the error message
+                if insert.is_enabled:
+                    raise TypeError()
+
         except TypeError:
             insert.error_message = "Error loading category: \'" + insertJSON['category'] + "\' with insert \'" + insertJSON['insert_name'] + "\'"
 

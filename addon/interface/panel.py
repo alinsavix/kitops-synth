@@ -4,8 +4,8 @@ import bpy
 from bpy.types import Panel, UIList, Menu
 from bpy.utils import register_class, unregister_class
 from .. import property
-from .. utility import addon, distributors, inserts
-from kitops.addon.utility import insert
+from .. utility import addon, distributors, inserts, update
+from kitops.addon.utility import insert, addon as kitops_addon
 from bpy.props import BoolProperty
 
 
@@ -20,7 +20,7 @@ class KO_SYNTH_LAYER_ENTRY_UL_List(UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index): 
         self.use_filter_show = False
 
-        layer_icon = 'RIGHTARROW_THIN' if index == context.scene.kitopssynth.layer_index else 'BLANK1'
+        layer_icon = 'RIGHTARROW_THIN' if index == active_data.layer_index else 'BLANK1'
         
         # Make sure your code supports all 3 layout types 
         if self.layout_type in {'DEFAULT', 'COMPACT'}: 
@@ -33,16 +33,29 @@ class KO_SYNTH_LAYER_ENTRY_UL_List(UIList):
 
             row.prop(item, 'layer_name', text='') 
 
-            layer = context.scene.kitopssynth.layers[index]
+            layer = active_data.layers[index]
+
+            
+            if context.active_object and \
+                layer.name in context.active_object.kitopssynth_layer_face_map and \
+                    len(context.active_object.kitopssynth_layer_face_map[layer.name].face_ids):
+                selected_faces_icon = "KEYTYPE_MOVING_HOLD_VEC"
+            else:
+                selected_faces_icon = "HANDLETYPE_FREE_VEC"
 
 
-            props = row.operator("ko.synth_select_layer_faces", icon="SELECT_INTERSECT", text='')
-            props.layer_index = index
+            row.label(text="", icon = selected_faces_icon)
+
+            subrow = row.row()
+            subrow.active = active_data.layer_index != index
+            props = subrow.operator('ko.synth_copy_layer_selections_to_another', icon='CON_SIZELIKE', text='')
+            props.source_layer_index = index
+            
 
             props = row.operator('ko.synth_clear_layer', icon='BRUSH_DATA', text='')
             props.layer_uid = layer.name
             props.delete_all = True
-            
+
             props = row.operator('ko.synth_reset_layer', icon='DECORATE_OVERRIDE', text='')
             props.index_to_reset = index
 
@@ -63,8 +76,10 @@ class KO_PT_SYNTH_UI_PT_MainPanel(Panel):
     bl_category = 'SYNTH'
 
     def draw(self, context):
+        self.layout.enabled = update.poll_add_random_inserts(context)
 
         layout = self.layout
+
         col = layout.column()
         col.alert = True
         # display any messages
@@ -94,6 +109,8 @@ class KO_PT_SYNTH_UI_PT_ActionsPanel(bpy.types.Panel):
 
     def draw(self, context):
         """Draw all options for the user to input to."""
+        self.layout.enabled = update.poll_add_random_inserts(context)
+
         layout = self.layout
         scene = context.scene
         preference = get_current_layer(context)
@@ -101,35 +118,44 @@ class KO_PT_SYNTH_UI_PT_ActionsPanel(bpy.types.Panel):
             layout.label(text="No Layer Selected")
             return
         option = addon.option()
-        if not insert.authoring() and not context.scene.kitops.thumbnail: # TODO wrong place?
-            if len(option.kpack.categories):
-                
-                box = layout.box()
 
-                col = box.column(align=True)
-                col = col.column()
+        box = layout.box()
+
+        col = box.column(align=True)
+        col = col.column()
+        row = col.row()
+        row.alignment='CENTER'
+        row.prop(context.scene.kitopssynth, 'preview_mode', text="Preview")
+
+        # row = col.row()
+        # row.alignment='CENTER'
+        row.prop(context.scene.kitopssynth, 'auto_update',  text='Auto Update')          
+
+        if context.scene.kitopssynth.preview_mode:
+            col = box.column()
+            row = col.row()
+            row.label(text="Preview Type")
+            row.prop(context.scene.kitopssynth, 'preview_type', text="", expand=False)
+            if context.scene.kitopssynth.preview_type == 'FAST':
                 row = col.row()
-                row.alignment='CENTER'
-                row.prop(context.scene.kitopssynth, 'preview_mode', text="Preview")
-
-                # row = col.row()
-                # row.alignment='CENTER'
-                row.prop(context.scene.kitopssynth, 'auto_update',  text='Auto Update')          
-
-                col = box.column(align=True)
-                row = col.row(align=True)
+                row.label(text="Fast Mode Color")
+                row.prop(context.scene.kitopssynth, 'preview_color', text="")
                 
-                if distributors.is_complex(context):
-                    col = row.column(align=True)
-                    col.alert = True
-                    col.operator('ko.synth_add_random_inserts_confirm', text="DO IT")
-                else:
-                    props = row.operator('ko.synth_add_random_inserts', text="DO IT")
-                    props.layer_id = ''
-                row.operator('ko.synth_clear', text="CLEAR")
 
-                col = box.column(align=True)
-                col.prop(context.scene.kitopssynth, 'seed', text="Main Seed")
+        col = box.column(align=True)
+        row = col.row(align=True)
+        
+        if distributors.is_complex(context):
+            col = row.column(align=True)
+            col.alert = True
+            col.operator('ko.synth_add_random_inserts_confirm', text="DO IT")
+        else:
+            props = row.operator('ko.synth_add_random_inserts', text="DO IT")
+            props.layer_id = ''
+        row.operator('ko.synth_clear_all', text="CLEAR")
+
+        col = box.column(align=True)
+        col.prop(context.scene.kitopssynth, 'seed', text="Main Seed")
 
 
 class KO_PT_SYNTH_UI_PT_IteratorPanel(bpy.types.Panel):
@@ -144,19 +170,30 @@ class KO_PT_SYNTH_UI_PT_IteratorPanel(bpy.types.Panel):
 
     def draw(self, context):
         """Draw all options for the user to input to."""
+        self.layout.enabled = update.poll_add_random_inserts(context)
         layout = self.layout
         scene = context.scene
         option = addon.option()
-        if not insert.authoring() and not context.scene.kitops.thumbnail: # TODO wrong place?
-            if len(option.kpack.categories):
 
-                col = layout.column()
-                col.label(text='Seed Range')#
-                row = col.row(align=True)
-                row.prop(context.scene.kitopssynth_iterator, 'start_seed', text="")
-                row.prop(context.scene.kitopssynth_iterator, 'end_seed', text="")
-                col.prop(context.scene.kitopssynth_iterator, 'file_path', text="")
-                col.operator('ko.synth_iterator', text='Start')
+        if len(option.kpack.categories):
+
+            col = layout.column()
+            col.label(text='Seed Range')#
+            row = col.row(align=True)
+            row.prop(context.scene.kitopssynth_iterator, 'start_seed', text="")
+            row.prop(context.scene.kitopssynth_iterator, 'end_seed', text="")
+            col.prop(context.scene.kitopssynth_iterator, 'file_path', text="")
+            col.operator('ko.synth_iterator', text='Start')
+
+            if not bpy.data.filepath:
+                col = col.column()
+                col.alert = True
+                col.label(text="Save .blend file before proceeding")
+            else:
+                col = col.column()
+                col.label(text="NOTE: .blend file will autosave.")
+
+            
 
 
 
@@ -175,15 +212,21 @@ class KO_PT_SYNTH_UI_PT_InsertToolsPanel(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
         option = addon.option()
-        if not insert.authoring() and not context.scene.kitops.thumbnail: # TODO wrong place?
-            if len(option.kpack.categories):
 
-                col = layout.column(align=True)
-                col.operator('ko.synth_bake', text="Bake Object", icon='EXPERIMENTAL')
-                col.operator('ko.remove_wire_inserts', text='Remove Unused Wire INSERTs', icon='MESH_ICOSPHERE')
-                col.operator('ko.synth_refresh_kpacks', text='Refresh KIT OPS KPACKS', icon='FILE_REFRESH')
-                # col.operator('ko.synth_recalc_normals', text='Recalculate Normals', icon='NORMALS_FACE') TODO recalculate normals may still be introduced
-                col.operator('ko.synth_reset_all', text='Reset SYNTH Settings', icon='DECORATE_OVERRIDE')
+        col = layout.column(align=True)
+        col.operator('ko.synth_bake', text="Bake Object", icon='EXPERIMENTAL')
+        col.operator('ko.remove_wire_inserts', text='Remove Unused Wire INSERTs', icon='MESH_ICOSPHERE')
+        col.operator('ko.synth_refresh_kpacks', text='Refresh KIT OPS KPACKS', icon='FILE_REFRESH')
+        # col.operator('ko.synth_recalc_normals', text='Recalculate Normals', icon='NORMALS_FACE') TODO recalculate normals may still be introduced
+        col.operator('ko.synth_reset_all', text='Reset SYNTH Settings', icon='DECORATE_OVERRIDE')
+        
+        col.separator()
+        col.label(text='KIT OPS')
+        kitops_preference = kitops_addon.preference()
+        box = col.box()
+        row = box.row()
+        row.label(text='Mode')
+        row.prop(kitops_preference, 'mode', expand=True)
 
 class KO_PT_SYNTH_UI_PT_InsertLayersPanel(bpy.types.Panel):
     """Properties panel for add-on operators."""
@@ -196,22 +239,28 @@ class KO_PT_SYNTH_UI_PT_InsertLayersPanel(bpy.types.Panel):
 
     def draw(self, context):
         """Draw all options for the user to input to."""
+        self.layout.enabled = update.poll_add_random_inserts(context)
         layout = self.layout
         scene = context.scene
         option = addon.option()
-        if not insert.authoring() and not context.scene.kitops.thumbnail: # TODO wrong place?
-            if len(option.kpack.categories):
 
-                main_col = layout.column(align=True)
 
-                col = main_col.column(align=True)
-                col.template_list("KO_SYNTH_LAYER_ENTRY_UL_List", "The_List", scene.kitopssynth, "layers", scene.kitopssynth, "layer_index", type='DEFAULT')
 
-                row = col.row(align=True)
-                row.operator("ko.synth_add_layer", text="Add")
-                row.operator("ko.synth_duplicate_layer" , text="Duplicate")
-                row.operator("ko.synth_move_layer", icon="TRIA_UP", text='').direction = 'UP' 
-                row.operator("ko.synth_move_layer", icon="TRIA_DOWN", text='').direction = 'DOWN'
+        main_col = layout.column(align=True)
+
+        col = main_col.column(align=True)
+        col.template_list("KO_SYNTH_LAYER_ENTRY_UL_List", "The_List", scene.kitopssynth, "layers", scene.kitopssynth, "layer_index", type='DEFAULT')
+
+        row = col.row(align=True)
+        row.operator("ko.synth_add_layer", text="Add")
+
+        props = row.operator("ko.synth_set_layer_selection" , text="Set")
+        current_layer = get_current_layer(context)
+        if context.scene.kitopssynth.layer_index >= 0 and context.scene.kitopssynth.layer_index < len(context.scene.kitopssynth.layers):
+            props.layer_index = context.scene.kitopssynth.layer_index
+        row.operator("ko.synth_duplicate_layer" , icon="PASTEDOWN", text='')
+        row.operator("ko.synth_move_layer", icon="TRIA_UP", text='').direction = 'UP' 
+        row.operator("ko.synth_move_layer", icon="TRIA_DOWN", text='').direction = 'DOWN'
 
 
 
@@ -226,6 +275,7 @@ class KO_PT_SYNTH_UI_PT_InsertsPanel(bpy.types.Panel):
 
     def draw(self, context):
         """Draw all options for the user to input to."""
+        self.layout.enabled = update.poll_add_random_inserts(context)
         layout = self.layout
         scene = context.scene
         preference = get_current_layer(context)
@@ -234,22 +284,6 @@ class KO_PT_SYNTH_UI_PT_InsertsPanel(bpy.types.Panel):
             return
 
         option = addon.option()
-
-        if insert.authoring():
-            if not smart_enabled:
-                layout.label(icon='ERROR', text='Purchase KIT OPS PRO')
-                layout.label(icon='BLANK1', text='To use these features')
-
-            if context.scene.kitops.factory:
-                column = layout.column()
-                column.enabled = smart_enabled
-                column.label(text='INSERT name')
-                column.prop(option, 'insert_name', text='')
-
-            column = layout.column()
-            column.enabled = smart_enabled
-            column.label(text='Author')
-            column.prop(option, 'author', text='')
 
 
         col = layout.column()
@@ -331,6 +365,7 @@ class KO_PT_SYNTH_UI_PT_PlacementStylePanel(bpy.types.Panel):
 
     def draw(self, context):
         """Draw all options for the user to input to."""
+        self.layout.enabled = update.poll_add_random_inserts(context)
         layout = self.layout
         scene = context.scene
         preference = get_current_layer(context)
@@ -339,25 +374,21 @@ class KO_PT_SYNTH_UI_PT_PlacementStylePanel(bpy.types.Panel):
             return
         option = addon.option()
 
+        #Begin randomisation parameters.
+        box = layout.box()                
+        
+        col = box.column()
+        col.label(text='Seed')
+        col.prop(preference, 'seed', text='Seed Value', slider=False)
 
-        if not insert.authoring() and not context.scene.kitops.thumbnail: # TODO wrong place?
-            #Display INSERTS and randomisation options if KIT OPS categories are present.
-            if len(option.kpack.categories):
-                #Begin randomisation parameters.
-                box = layout.box()                
-                
-                col = box.column()
-                col.label(text='Seed')
-                col.prop(preference, 'seed', text='Seed Value', slider=False)
+        box = layout.box()     
+        row = box.row()
+        row.prop(preference, 'distribution', expand=True)
 
-                box = layout.box()     
-                row = box.row()
-                row.prop(preference, 'distribution', expand=True)
-
-                # draw distribution settings.
-                distribution_class_name = preference.distribution
-                distributor = getattr(distributors, distribution_class_name)
-                distributor.draw(preference, box.column())
+        # draw distribution settings.
+        distribution_class_name = preference.distribution
+        distributor = getattr(distributors, distribution_class_name)
+        distributor.draw(preference, box.column())
 
 
 class KO_PT_SYNTH_UI_PT_PlacementSizePanel(bpy.types.Panel):
@@ -372,6 +403,7 @@ class KO_PT_SYNTH_UI_PT_PlacementSizePanel(bpy.types.Panel):
 
     def draw(self, context):
         """Draw all options for the user to input to."""
+        self.layout.enabled = update.poll_add_random_inserts(context)
         layout = self.layout
         scene = context.scene
         preference = get_current_layer(context)
@@ -379,36 +411,36 @@ class KO_PT_SYNTH_UI_PT_PlacementSizePanel(bpy.types.Panel):
             layout.label(text="No Layer Selected")
             return
         option = addon.option()
-        if not insert.authoring() and not context.scene.kitops.thumbnail: # TODO wrong place?
-            if len(option.kpack.categories):
-                box = layout.box()
-                box.column().label(text='Size')
-                col = box.column()
-                # col.prop(preference, 'maintain_aspect_ratio') #TODO hidden for now, remove completely if maintain aspect ratio approach in each individual insert approach is agreed.
-                if preference.maintain_aspect_ratio:
-                    col.prop(preference, 'padding', slider=False)
-                    col.separator()
-                else:
-                    col.prop(preference, 'padding_h', text='Padding H')
-                    col.prop(preference, 'padding_v', text='Padding V')
-                    col.prop(preference, 'height_scale', text='Height %')
 
-                col.separator()
-                col.prop(preference, 'z_position', slider=False)
 
-                col.separator()
-                col.prop(preference, 'scale_x_deviation', slider=False)
-                col.prop(preference, 'scale_y_deviation', slider=False)
-                col.prop(preference, 'scale_z_deviation', slider=False)
+        box = layout.box()
+        box.column().label(text='Size')
+        col = box.column()
+        # col.prop(preference, 'maintain_aspect_ratio') #TODO hidden for now, remove completely if maintain aspect ratio approach in each individual insert approach is agreed.
+        if preference.maintain_aspect_ratio:
+            col.prop(preference, 'padding', slider=False)
+            col.separator()
+        else:
+            col.prop(preference, 'padding_h', text='Padding H')
+            col.prop(preference, 'padding_v', text='Padding V')
+            col.prop(preference, 'height_scale', text='Height %')
 
-                box = layout.box()
-                
-                box.column().label(text='Rotation')
-                col = box.column()
-                row = col.row(align=True)
-                row.prop(preference, 'rotation', slider=False)
-                row.prop(preference, 'rotation_respect_borders', icon='DRIVER_ROTATIONAL_DIFFERENCE', icon_only=True)
-                col.prop(preference, 'rotation_deviation', slider=False)
+        col.separator()
+        col.prop(preference, 'z_position', slider=False)
+
+        col.separator()
+        col.prop(preference, 'scale_x_deviation', slider=False)
+        col.prop(preference, 'scale_y_deviation', slider=False)
+        col.prop(preference, 'scale_z_deviation', slider=False)
+
+        box = layout.box()
+        
+        box.column().label(text='Rotation')
+        col = box.column()
+        row = col.row(align=True)
+        row.prop(preference, 'rotation', slider=False)
+        row.prop(preference, 'rotation_respect_borders', icon='DRIVER_ROTATIONAL_DIFFERENCE', icon_only=True)
+        col.prop(preference, 'rotation_deviation', slider=False)
 
 
 class KO_PT_SYNTH_UI_PT_OptimizePanel(bpy.types.Panel):
@@ -423,6 +455,7 @@ class KO_PT_SYNTH_UI_PT_OptimizePanel(bpy.types.Panel):
 
     def draw(self, context):
         """Draw all options for the user to input to."""
+        self.layout.enabled = update.poll_add_random_inserts(context)
         layout = self.layout
         scene = context.scene
         preference = get_current_layer(context)
@@ -430,13 +463,12 @@ class KO_PT_SYNTH_UI_PT_OptimizePanel(bpy.types.Panel):
             layout.label(text="No Layer Selected")
             return
         option = addon.option()
-        if not insert.authoring() and not context.scene.kitops.thumbnail: # TODO wrong place?
-            if len(option.kpack.categories):
-                if bpy.app.version[1] > 90:
-                    box = layout.box()
-                    box.column().label(text='Optimize')
-                    row = box.row()
-                    row.prop(preference, 'boolean_solver', expand=True)
+
+        if bpy.app.version[1] > 90:
+            box = layout.box()
+            box.column().label(text='Optimize')
+            row = box.row()
+            row.prop(preference, 'boolean_solver', expand=True)
 
     
 
@@ -459,31 +491,31 @@ class KO_PT_SYNTH_UI_PT_LoadSavePanel(bpy.types.Panel):
             layout.label(text="No Layer Selected")
             return
         option = addon.option()
-        if not insert.authoring() and not context.scene.kitops.thumbnail: # TODO wrong place?
-            if len(option.kpack.categories):
-                
-                box = layout.box()
-                col = box.column()
-                row = col.row(align=True)
-                row.operator('ko.synth_open_filebrowser', text='LOAD RECIPE')
 
-                box = layout.box()
-                col = box.column(align=True)
-                col.alignment='CENTER'
 
-                # description handling if starts with http.
-                description = context.scene.kitopssynth.description
-                edit_description = context.scene.kitopssynth.edit_description
-                row = col.row(align=True)
-                # split = row.split(factor=0.8, align=True)
-                if not description.startswith('http') or edit_description:
-                    row.prop(context.scene.kitopssynth, 'description', text='')
-                else:
+            
+        box = layout.box()
+        col = box.column()
+        row = col.row(align=True)
+        row.operator('ko.synth_open_filebrowser', text='LOAD RECIPE')
 
-                    row.operator("ko.synth_open_help_url", icon='LINKED', text="Click Link").url = description
-                    row.prop(context.scene.kitopssynth, 'edit_description', icon='GREASEPENCIL', text='', toggle=False)
+        box = layout.box()
+        col = box.column(align=True)
+        col.alignment='CENTER'
 
-                col.operator('ko.synth_save_filebrowser', text='SAVE RECIPE')
+        # description handling if starts with http.
+        description = context.scene.kitopssynth.description
+        edit_description = context.scene.kitopssynth.edit_description
+        row = col.row(align=True)
+        # split = row.split(factor=0.8, align=True)
+        if not description.startswith('http') or edit_description:
+            row.prop(context.scene.kitopssynth, 'description', text='')
+        else:
+
+            row.operator("ko.synth_open_help_url", icon='LINKED', text="Click Link").url = description
+            row.prop(context.scene.kitopssynth, 'edit_description', icon='GREASEPENCIL', text='', toggle=False)
+
+        col.operator('ko.synth_save_filebrowser', text='SAVE RECIPE')
 
                 
 

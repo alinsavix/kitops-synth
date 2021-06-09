@@ -15,7 +15,7 @@ def random_generator(context, layer):
         rng = np.random.RandomState((preference.seed + layer.seed) % _max_seed)
     return rng
 
-#TODO redundant for now.
+
 def point_on_triangle(pt1, pt2, pt3, rng):
     """Calculate random point on the triangle with vertices pt1, pt2 and pt3."""
     s, t, = sorted([rng.uniform(0,1), rng.uniform(0,1)])

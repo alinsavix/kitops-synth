@@ -1,60 +1,23 @@
 
 import bpy
 from kitops.addon.utility import addon as kitops_addon
-from kitops.addon.utility import insert, remove
+from kitops.addon.utility import insert, remove, id, regex
 import numpy as np
 import copy
 from . import addon, randomness
 from mathutils import Vector, Euler, Matrix, Quaternion
+import bmesh
+import os
+
 
 def cleanup(prop, context, clear=False):
-        #TODO make sure all this is relevant and only needs to be called once.
-        option = addon.option()
-        # if prop.main.kitops.animated:
-        #     bpy.ops.screen.animation_cancel(restore_frame=True)
-        if not option.show_cutter_objects:
-            for obj in prop.cutter_objects:
-                obj.hide_viewport = True
-        if clear:
-            for obj in prop.inserts:
-                bpy.data.objects.remove(obj)
 
-            for obj in prop.init_selected:
-                # obj.select_set(True)
-                pass
+    option = addon.option()
+    if not option.show_cutter_objects:
+        for obj in prop.cutter_objects:
+            obj.hide_viewport = True
 
-            if prop.init_active:
-                context.view_layer.objects.active = prop.init_active
-        else:
-            for obj in prop.inserts:
-                try:
-                    if obj.select_get() and obj.kitops.selection_ignore:
-                        # obj.select_set(False)
-                        pass
-                    else:
-                        # obj.select_set(True)
-                        pass
-                except ReferenceError:
-                    pass
-
-        #TODO: collection helper: collection.remove
-        if 'INSERTS' in bpy.data.collections:
-            for child in bpy.data.collections['INSERTS'].children:
-                if not child.objects and not child.children:
-                    bpy.data.collections.remove(child)
-
-        insert.operator = None
-
-        if 'INSERTS' in bpy.data.collections and not bpy.data.collections['INSERTS'].objects and not bpy.data.collections['INSERTS'].children:
-            bpy.data.collections.remove(bpy.data.collections['INSERTS'])
-
-        for mesh in bpy.data.meshes:
-            if mesh.users == 0:
-                bpy.data.meshes.remove(mesh)
-
-        insert.show_solid_objects()
-        insert.show_cutter_objects()
-        insert.show_wire_objects()
+    insert.operator = None
 
 def set_display_type(uuid, display_type):
     objects_to_set = [obj for obj in bpy.data.objects if obj.kitops.id == uuid]
@@ -147,31 +110,24 @@ def purge_data_block(blockref):
         if block.users == 0:
             getattr(bpy.data, blockref).remove(block)
 
-def delete_hierarchy(obj_to_delete, target_obj):
+def delete_hierarchy(obj_to_delete, target_obj=None):
     """Delete an object and it's hierarchy.""" #TODO move to helper class.
-    
 
-
-    if obj_to_delete is None:
+    if obj_to_delete is None or \
+        (target_obj is not None and \
+                obj_to_delete.kitops.reserved_target != target_obj): 
         return
-
-    # TODO - code to be introduced - the below is inspired by remove_insert_properties !
-    # for obj_bool in bpy.data.objects:
-    #             for mod in obj_bool.modifiers:
-    #                 if mod.type == 'BOOLEAN':
-    #                     if mod.object.kitops.id == obj.kitops.id:
-    #                         obj_bool.modifiers.remove(mod)                      
-    # bpy.ops.ko.remove_insert_properties(remove=True, uuid=obj.kitops.id)
 
     objects_to_delete = [obj for obj in bpy.data.objects if obj is not None and obj.kitops.id == obj_to_delete.kitops.id]
 
     for obj in objects_to_delete:
         # find any boolean modifiers in all objects and remove the boolean.
 
-        for mod in target_obj.modifiers:
-            if mod.type == 'BOOLEAN':
-                if mod.object == obj:
-                    target_obj.modifiers.remove(mod)
+        if target_obj is not None:
+            for mod in target_obj.modifiers:
+                if mod.type == 'BOOLEAN':
+                    if mod.object == obj:
+                        target_obj.modifiers.remove(mod)
 
         obj.kitops['insert'] = False
         obj.kitops['insert_target'] = None
@@ -192,6 +148,7 @@ def purge_data_blocks():
     purge_data_block('images')
     purge_data_block('node_groups')
     purge_data_block('curves')
+    purge_data_block('fonts')
 
 
 
@@ -237,6 +194,7 @@ def insert_add(op, context, boolean_solver):
     return uid
 
 
+
 class InsertFrame():
 
     def __init__(self, bound_box, matrix_world, scale, rotation_euler, location, hide_viewport, op_location, boolean_solver):
@@ -251,14 +209,78 @@ class InsertFrame():
         self.op_location = op_location
         self.boolean_solver = boolean_solver
 
+        self.cache_location = self.location.copy()
+        self.cache_scale = self.scale.copy()
+        self.cache_matrix = self.matrix_world.copy()
+        self.cache_euler = self.rotation_euler.copy()
+
     def to_object(self, op, context, convert_matrix):
         op.location = self.op_location
-        uid = insert_add(op, context, self.boolean_solver)
 
-        insert_obj = get_insert(uid) 
 
-        if insert_obj == None:
-            return None
+        if context.scene.kitopssynth.preview_mode and context.scene.kitopssynth.preview_type == 'FAST':
+            #we're gonna draw something instead based on object bounding box....
+            kitops_preference = kitops_addon.preference()
+            basename = os.path.basename(op.location)
+            collection_name = regex.clean_name(basename[:-6].title(), use_re=kitops_preference.clean_datablock_names)
+            insert_name = collection_name + " Preview"
+
+            me = bpy.data.meshes.new(insert_name)
+            insert_obj = bpy.data.objects.new(insert_name, me)
+            insert_obj.kitopssynth_insert.is_preview_insert = True
+            insert_obj.kitops.id = id.uuid()
+
+
+            insert_obj.location = self.cache_location
+            insert_obj.matrix_world = self.cache_matrix
+            insert_obj.scale = self.cache_scale
+            insert_obj.rotation_euler = self.cache_euler
+            insert_obj.color = context.scene.kitopssynth.preview_color
+
+
+
+            bm = bmesh.new()
+
+            i = 0
+            for loc in self.bound_box:
+                # v = bm.verts.new(insert_obj.matrix_world.inverted() @ Vector(loc))
+                v = bm.verts.new(loc)
+                v.index = i
+                i+=1
+
+            bm.verts.ensure_lookup_table()
+
+            if len(bm.verts) == 8:
+                bm.faces.new([bm.verts[0], bm.verts[1], bm.verts[2], bm.verts[3]])
+                bm.faces.new([bm.verts[7], bm.verts[6], bm.verts[5], bm.verts[4]])
+                bm.faces.new([bm.verts[0], bm.verts[4], bm.verts[5], bm.verts[1]])
+                bm.faces.new([bm.verts[5], bm.verts[6], bm.verts[2], bm.verts[1]])
+                bm.faces.new([bm.verts[7], bm.verts[4], bm.verts[0], bm.verts[3]])
+                bm.faces.new([bm.verts[7], bm.verts[3], bm.verts[2], bm.verts[6]])
+
+            bm.to_mesh(me)
+            bm.free()
+
+            
+            if 'INSERTS' not in bpy.data.collections:
+                context.scene.collection.children.link(bpy.data.collections.new(name='INSERTS'))
+
+            collection_name = regex.clean_name(basename[:-6].title(), use_re=kitops_preference.clean_datablock_names)
+            if collection_name not in bpy.data.collections:
+                bpy.data.collections['INSERTS'].children.link(bpy.data.collections.new(name=collection_name))
+
+            bpy.data.collections[collection_name].objects.link(insert_obj)
+
+        else:
+
+            uid = insert_add(op, context, self.boolean_solver)
+
+            insert_obj = get_insert(uid)
+
+            if insert_obj == None:
+                return None
+
+        insert_obj.kitopssynth_insert.is_preview_insert = context.scene.kitopssynth.preview_mode
 
         # determine delta between central location and actual center.
         origin = insert_obj.location
@@ -280,8 +302,10 @@ class InsertFrame():
         insert_obj.rotation_euler.rotate_axis("Z", self.kitopssynth.intended_rotation)
         insert_obj.scale = self.scale
 
-        if context.scene.kitopssynth.preview_mode:
+        if context.scene.kitopssynth.preview_mode and context.scene.kitopssynth.preview_type == "WIREFRAME":
             set_display_type(insert_obj.kitops.id, 'WIRE')
+
+        insert.parent_objects(insert_obj, context.scene.kitopssynth_target_obj)
 
         cleanup(op, context)
 
@@ -316,6 +340,7 @@ class InsertFrameCache():
                                     old_bool_target = op.boolean_target
                                     op.boolean_target = None
 
+                                    # temporarily get insert for sizing purposes
                                     uid = insert_add(op, context, layer.boolean_solver)
 
                                     if uid is None or uid == '':
@@ -335,7 +360,7 @@ class InsertFrameCache():
                                             op.location,
                                             layer.boolean_solver)
                                         self.insert_frames[op.location] = insert_frame
-                                        delete_hierarchy(insert_obj, target_obj)
+                                        delete_hierarchy(insert_obj)
 
     def get_insert_frame(self, op):
         if op.location in self.insert_frames:

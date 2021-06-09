@@ -48,7 +48,8 @@ def calc_dimensions(matrix_world, local_center, local_normal, all_verts, padding
     mx_norm = mx_inv.transposed().to_3x3()
     direction = mx_norm @ local_normal
 
-    track_quaternion = direction.to_track_quat('Z', 'Y')
+    # get the orientation by rotating by the world object and then by the local normal rotation
+    track_quaternion = matrix_world.to_quaternion() @ local_normal.to_track_quat('Z', 'Y')
 
     # set up a matrix to align the objects to to generate a grid that maps to the bounds extents of the face.
     matrix = track_quaternion.to_matrix().to_4x4()
@@ -1458,18 +1459,20 @@ class EdgeDistributor(AbstractDistributor):
                     # get the inverted coordinates of the flattened face area to go around in...maybe we don't need this?
                     matrix, direction, inverted_face_dim_x, inverted_face_dim_y, inverted_x_min, inverted_x_max, inverted_y_min, inverted_y_max, padding_redundant = calc_dimensions(target_obj.matrix_world, local_center, local_normal, edge_group_verts, preference.padding)
 
-                    # order the edge group to attempt to get a similar pattern every time.
-                    matrix_inverted = matrix.inverted()
 
                     def sort_edge(k):
-                        av_point = (matrix_inverted @ ((k.verts[0].co  + k.verts[1].co) * 0.5)   ) 
+                        av_point = ((k.verts[0].co  + k.verts[1].co) * 0.5) 
                         return  (av_point[0], av_point[1], av_point[2])
                     edge_group.sort(key=sort_edge  ) 
                     
                     first_vert = None
                     current_edge = edge_group[0]
                     verts = current_edge.verts
-                    verts = sorted(verts, key=lambda k: (k.co.x, k.co.y, k.co.z)) 
+                    def verts_key(k):
+                        point =   Vector((k.co.x, k.co.y, k.co.z))
+                        return (point[0], point[1], point[2])
+                    
+                    verts = sorted(verts, key=verts_key) 
                     current_vert = verts[0]
                     ordered_edge_tuples = []
                     while(current_vert != first_vert):

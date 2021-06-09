@@ -7,13 +7,14 @@ from bpy_extras.io_utils import ImportHelper, ExportHelper
 from bpy.types import Operator
 from bpy.props import StringProperty, BoolProperty, PointerProperty, IntProperty
 from bpy_extras import mesh_utils
-from kitops.addon.utility import insert 
+from kitops.addon.utility import insert, collections, addon as kitops_addon
 from .. import property
-from .. utility import addon, collections, update, inserts, distributors, messages
+from .. utility import addon, update, inserts, distributors, messages
 from .. utility.encoding import RecipeEncoder, decode_recipe
 import os
 import json
 import uuid
+import time
 
 class add_random_inserts():
     """Operator definition class for randomly placing inserts on object selected faces"""
@@ -28,7 +29,9 @@ class add_random_inserts():
     init_active = None
     init_selected = list()
 
-    # redundant, to be passed so that the inserts module can operate.
+
+
+    # to be passed so that the inserts module can operate.
     material: BoolProperty(name='Material', default=False)
     material_link: BoolProperty(name='Link Materials')
     duplicate = None
@@ -36,6 +39,7 @@ class add_random_inserts():
 
     def invoke(self, context, event):
         """Initial set up of an insert"""
+
         
         messages.clear_messages(context)
         # Check for complexity
@@ -157,9 +161,9 @@ class KO_OT_synth_ConfirmOperator(Operator):
 
 
 
-class KO_OT_synth_clear(Operator):
+class KO_OT_synth_clear_from_selection(Operator):
     """"Operator class for clearing INSERTs"""
-    bl_idname = 'ko.synth_clear'
+    bl_idname = 'ko.synth_clear_from_selection'
     bl_label = 'Clear'
     bl_description = 'Clear the INSERTs from the current selection'
     bl_options = {'INTERNAL', 'UNDO'}
@@ -179,7 +183,10 @@ class KO_OT_synth_clear(Operator):
                 inserts_to_delete = layer_to_delete.inserts
                 for insert_ref in inserts_to_delete:
                     insert_obj = insert_ref.insert_obj
-                    inserts.delete_hierarchy(insert_obj, active_object)
+                    if not insert_obj.kitopssynth_insert.is_preview_insert:
+                        inserts.delete_hierarchy(insert_obj, active_object)
+                    else:
+                        inserts.delete_hierarchy(insert_obj)
             insert_entry_map.layers.clear()
             distributors.delete_synth_entry(active_object, insert_entry_map)
             inserts.purge_data_blocks()
@@ -222,7 +229,14 @@ class KO_OT_synth_clear_layer(Operator):
                 inserts_to_delete = layer_to_delete.inserts
                 for insert_ref in inserts_to_delete:
                     insert_obj = insert_ref.insert_obj
-                    inserts.delete_hierarchy(insert_obj, active_object)
+                    
+                    if insert_obj is None:
+                        continue
+
+                    if not insert_obj.kitopssynth_insert.is_preview_insert:
+                        inserts.delete_hierarchy(insert_obj, active_object)
+                    else:
+                        inserts.delete_hierarchy(insert_obj)
                 layer_to_delete.inserts.clear()
                 insert_entry_map.layers.remove(insert_entry_map.layers.find(layer_to_delete.name))                
 
@@ -234,6 +248,26 @@ class KO_OT_synth_clear_layer(Operator):
         
         if purge:
             inserts.purge_data_blocks()
+        
+        return {'FINISHED'}
+
+class KO_OT_synth_clear_all(Operator):
+    """"Operator class for clearing INSERTs"""
+    bl_idname = 'ko.synth_clear_all'
+    bl_label = 'Clear'
+    bl_description = 'Clear the INSERTs for enabled layers'
+    bl_options = {'INTERNAL', 'UNDO'}
+    
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.scene.kitopssynth.layers
+
+    def execute(self, context):
+        layers = context.scene.kitopssynth.layers
+
+        for layer in layers:
+            if layer.is_enabled:
+                bpy.ops.ko.synth_clear_layer('INVOKE_DEFAULT', layer_uid= layer.name, delete_all=True)
         
         return {'FINISHED'}
 
@@ -272,6 +306,7 @@ class KO_OT_synth_bake(Operator):
                 insert_entry_map.layers.clear()
             active_object.kitopssynth_insert_map.clear()
 
+            active_object.kitopssynth_layer_face_map.clear()
 
             if 'kitops' in context.preferences.addons:
                 bpy.ops.ko.convert_to_mesh()
@@ -310,11 +345,6 @@ class KO_OT_synth_bake(Operator):
             obj.select_set(False)
         finally:
             context.scene.kitopssynth.auto_update = old_update_state
-        
-        
-
-
-
 
         report_message = 'Active Layers have been baked.  Faces have been deselected.'
         self.report({'INFO'}, report_message)
@@ -325,7 +355,8 @@ def init_layer(layer):
     option = addon.option()
     for i in range(0,7):
         insert_entry = layer.inserts.add()
-        insert_entry.category = option.kpack.categories[option.kpack.active_index].name
+        if len(option.kpack.categories):
+            insert_entry.category = option.kpack.categories[0].name
     if len(layer.inserts) > 0:
         insert = layer.inserts[0]
         insert.is_expanded = True
@@ -360,7 +391,7 @@ class KO_OT_AddLayer(Operator):
 class KO_OT_DuplicateLayer(Operator): 
     """Duplicate the selected layer""" 
     bl_idname = "ko.synth_duplicate_layer" 
-    bl_label = "Adds a layer" 
+    bl_label = "Duplicate a layer" 
     bl_options = {'INTERNAL', 'UNDO'}
 
     def execute(self, context): 
@@ -372,12 +403,28 @@ class KO_OT_DuplicateLayer(Operator):
             layer_to_copy = layers[index]
 
             new_layer = layers.add()
-            new_layer.name = str(uuid.uuid4())
+            
 
             for k, v in layer_to_copy.items():
                 new_layer[k] = v
 
-            new_layer.name += ' Copy'
+            new_layer.name = str(uuid.uuid4())
+
+            new_layer.layer_name += ' Copy'
+
+            #also copy associated face selections
+            face_ids = []
+            layer_id = layer_to_copy.name
+            for obj in bpy.data.objects:
+                kitopssynth_layer_face_map = obj.kitopssynth_layer_face_map
+                if len(obj.kitopssynth_layer_face_map) and layer_id in kitopssynth_layer_face_map:
+                    face_ids = kitopssynth_layer_face_map[layer_id].face_ids
+                    if len(face_ids):
+                        face_map_ref = kitopssynth_layer_face_map.add()
+                        face_map_ref.name = new_layer.name
+                        face_ids = kitopssynth_layer_face_map[new_layer.name].face_ids
+                        for face_id in face_ids:
+                            face_map_ref.face_ids.add().face_id = face_id.face_id
 
             context.scene.kitopssynth.layer_index = len(layers) - 1
         else:
@@ -605,6 +652,8 @@ class KO_OT_SelectLayerFaces(Operator):
 
     layer_index : IntProperty()
 
+    previous_layer_index : IntProperty(default=-1)
+
     @classmethod
     def poll(cls, context):
         return context.active_object
@@ -613,13 +662,39 @@ class KO_OT_SelectLayerFaces(Operator):
         layers = context.scene.kitopssynth.layers
         index = self.layer_index
 
-        layer = layers[index]
+        try:
+            layer = layers[index]
+        except IndexError:
+            return {'CANCELLED'}
 
         layer_id = layer.name
 
-        if layer_id in context.scene.kitopssynth_layer_face_map:
-            face_ids = context.scene.kitopssynth_layer_face_map[layer_id].face_ids
-            obj = context.active_object
+        for obj in bpy.data.objects:
+
+            if obj.type != 'MESH' or not len(obj.kitopssynth_layer_face_map):
+                continue
+
+            face_ids = []
+            if layer_id in obj.kitopssynth_layer_face_map:
+                face_ids = obj.kitopssynth_layer_face_map[layer_id].face_ids
+
+            if not len(face_ids):
+                # if we don't have any face ids for this current layer, use the previous layer's face selection (if set) to apply to the new selection.
+                try:
+                    previous_layer = layers[self.previous_layer_index]
+                    previous_layer_id = previous_layer.name
+                    if previous_layer_id in obj.kitopssynth_layer_face_map:
+                        face_ids = obj.kitopssynth_layer_face_map[previous_layer_id].face_ids
+                        # TODO - this code will also automatically set the face layer selection, currently this is left to the user.
+                        # if len(face_ids):
+                        #     if layer_id not in obj.kitopssynth_layer_face_map:
+                        #         obj.kitopssynth_layer_face_map.add().name = layer_id
+                        #     for face_id in face_ids:
+                        #         obj.kitopssynth_layer_face_map[layer_id].face_ids.add().face_id = face_id.face_id
+                except IndexError:
+                    pass
+
+
             bm = bmesh.new()
             if obj.mode == 'EDIT':
                 bm = bmesh.from_edit_mesh(obj.data)
@@ -637,13 +712,12 @@ class KO_OT_SelectLayerFaces(Operator):
                     pass
 
             if obj.mode == 'EDIT':
-                 bmesh.update_edit_mesh(obj.data)
+                    bmesh.update_edit_mesh(obj.data)
             elif obj.mode == 'OBJECT':
                 bm.to_mesh(obj.data)
                 bm.free()
-            return{'FINISHED'}
-        
-        return{'CANCELLED'}
+
+        return{'FINISHED'}
 
 
 class KO_OT_RefreshSynthKPACKS(Operator):
@@ -670,7 +744,6 @@ class KO_OT_ResetAll(Operator):
         layers.clear()
         layer = layers.add()
         layer.name = str(uuid.uuid4())
-        layer.layer_name = "Default Layer"
         init_layer(layer)
 
         context.scene.kitopssynth.layer_index = 0
@@ -712,15 +785,27 @@ class KO_OT_RecalcNormals(bpy.types.Operator):
 
         return {'FINISHED'}
 
+def fix_context(context):
+    """Fix bpy.context if some command (like .blend import) changed/emptied it"""
+    for window in bpy.context.window_manager.windows:
+        screen = window.screen
+        for area in screen.areas:
+            if area.type == 'VIEW_3D':
+                for region in area.regions:
+                    if region.type == 'WINDOW':
+                        override = {'window': window, 'screen': screen, 'area': area, 'region': region, 'scene' : context.scene}
+                        return override
+
+
 class KO_OT_SynthIterator(bpy.types.Operator):
-    """SYNTH Iterator"""
+    """Start SYNTH Iterator"""
     bl_idname = "ko.synth_iterator"
     bl_label = "SYNTH Iterator Run"
     bl_options = {"INTERNAL", "UNDO"}
 
     @classmethod
     def poll(cls, context):
-        return update.poll_add_random_inserts(context)
+        return update.poll_add_random_inserts(context) and bpy.data.filepath
 
     def execute(self, context):
         file_path = context.scene.kitopssynth_iterator.file_path
@@ -731,8 +816,9 @@ class KO_OT_SynthIterator(bpy.types.Operator):
         old_auto_update = context.scene.kitopssynth.auto_update
         old_file_path = context.scene.render.filepath
 
+        context.scene.kitopssynth.auto_update = False
+
         try:
-            context.scene.kitopssynth.auto_update = True
 
             if not os.path.exists(file_path):
                 os.makedirs(file_path)
@@ -740,7 +826,12 @@ class KO_OT_SynthIterator(bpy.types.Operator):
             ack_path = os.path.join(file_path, 'running.ack')
             open(ack_path, 'a').close()
 
+            bpy.ops.wm.save_mainfile(filepath=bpy.data.filepath)
+
             for seed in range(start_seed, end_seed + 1):
+                start = time.time()
+                bpy.ops.wm.revert_mainfile()
+                override = fix_context(context)
                 # first check if we should abort because the .ack file is no longer there.
                 try:
                     f = open (ack_path)
@@ -752,10 +843,17 @@ class KO_OT_SynthIterator(bpy.types.Operator):
                 finally:
                     f.close()
 
+                print('Commence Iterator with SEED: ', seed)
+
                 # perform the next iteraton.
                 context.scene.kitopssynth.seed = seed
+                bpy.ops.ko.synth_add_random_inserts(override, 'INVOKE_DEFAULT', layer_id='')
                 context.scene.render.filepath = os.path.join(file_path, 'synth_iterator_' + str(seed))
                 bpy.ops.render.render(write_still = True)
+
+                end = time.time()
+
+                print('SYNTH Time Taken: ', str(end-start))
 
         finally:
             context.scene.kitopssynth.seed = old_master_seed
@@ -764,10 +862,107 @@ class KO_OT_SynthIterator(bpy.types.Operator):
 
         return {'FINISHED'}
 
+
+class KO_OT_SetLayerSelection(bpy.types.Operator):
+    """Set Layer Selection"""
+    bl_idname = "ko.synth_set_layer_selection"
+    bl_label = "Set Layer Selection"
+    bl_options = {"INTERNAL", "UNDO"}
+
+    layer_index : IntProperty()
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and (context.scene.kitopssynth.layer_index >= 0 and context.scene.kitopssynth.layer_index < len(context.scene.kitopssynth.layers))
+
+    def execute(self, context):
+
+        layers = context.scene.kitopssynth.layers
+        index = self.layer_index
+
+        try:
+            layer = layers[index]
+        except IndexError:
+            return {'CANCELLED'}
+
+        target_obj = context.active_object
+
+        layer_id = layer.name
+        if layer_id not in target_obj.kitopssynth_layer_face_map:
+            face_map_ref = target_obj.kitopssynth_layer_face_map.add()
+            face_map_ref.name = layer_id
+        face_ids = target_obj.kitopssynth_layer_face_map[layer_id].face_ids
+        # update the layer -> face selection mapping from the existing face selection
+        face_ids.clear()
+        face_id_list = property.generate_face_id_list(target_obj)
+        for face_id in face_id_list:
+            face_ids.add().face_id = face_id
+            
+        return {'FINISHED'}
+
+
+class KO_OT_synth_copy_layer_face_selection(Operator):
+    """"Operator class for copying a given layer selection to other layers."""
+    bl_idname = 'ko.synth_copy_layer_selections_to_another'
+    bl_label = 'Copy face selection to active layer'
+    bl_description = 'Copy the face selection from this layer to the active layer.'
+    bl_options = {'UNDO', 'INTERNAL'}
+
+    source_layer_index : IntProperty()
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object
+
+    def execute(self, context):
+
+        if self.source_layer_index == context.scene.kitopssynth.layer_index:
+            return {'CANCELLED'}
+
+        layers = context.scene.kitopssynth.layers
+
+        try:
+            source_layer = layers[self.source_layer_index]
+            target_layer = layers[context.scene.kitopssynth.layer_index]
+        except IndexError:
+            return {'CANCELLED'}
+
+        source_layer_id = source_layer.name
+        target_layer_id = target_layer.name
+
+        for obj in bpy.data.objects:
+            if source_layer_id in obj.kitopssynth_layer_face_map:
+                source_face_ids = obj.kitopssynth_layer_face_map[source_layer_id].face_ids
+            else:
+                if target_layer_id not in obj.kitopssynth_layer_face_map:
+                    continue
+                source_face_ids = []
+
+            if target_layer_id not in obj.kitopssynth_layer_face_map:
+                obj.kitopssynth_layer_face_map.add().name = target_layer_id
+
+            target_face_ids = obj.kitopssynth_layer_face_map[target_layer_id].face_ids
+
+            target_face_ids.clear()
+
+            for face_id in source_face_ids:
+                target_face_ids.add().face_id = face_id.face_id
+
+        context.view_layer.update()
+            
+        bpy.ops.ko.synth_select_layer_faces('INVOKE_DEFAULT', layer_index=context.scene.kitopssynth.layer_index, previous_layer_index=-1)
+
+        context.view_layer.update()
+        
+        return {'FINISHED'}
+
+
+
 classes = [KO_OT_synth_add_random_inserts, 
             KO_OT_synth_ConfirmOperator,
-            KO_OT_synth_clear,
+            KO_OT_synth_clear_from_selection,
             KO_OT_synth_clear_layer,
+            KO_OT_synth_clear_all,
             KO_OT_synth_bake,
             KO_OT_AddLayer,
             KO_OT_DuplicateLayer,
@@ -785,7 +980,9 @@ classes = [KO_OT_synth_add_random_inserts,
             KO_OT_RefreshSynthKPACKS,
             KO_OT_ResetAll,
             KO_OT_RecalcNormals,
-            KO_OT_SynthIterator]
+            KO_OT_SynthIterator,
+            KO_OT_SetLayerSelection,
+            KO_OT_synth_copy_layer_face_selection]
 
 def register():
     for cls in classes:

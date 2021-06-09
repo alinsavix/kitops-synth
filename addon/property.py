@@ -5,11 +5,9 @@ from math import radians
 from bpy.types import PropertyGroup, EnumProperty
 from bpy.props import *
 from bpy.utils import register_class, unregister_class
-from kitops.addon.utility import insert
-from kitops.addon.utility import update as kitops_update
-from kitops.addon.utility import addon as kitops_addon
+from kitops.addon.utility import insert, enums, id, update as kitops_update, addon as kitops_addon
 from . utility import addon, update, distributors
-import hashlib
+import time
 
 
 def generate_insert_map_key(obj, face_id_list=None):
@@ -58,44 +56,13 @@ class kitops_placement(PropertyGroup):
     position : FloatVectorProperty()
     size: FloatVectorProperty()
 
-def _convert_to_number(string):
-    '''Attempt to create a unique integer for a string.  Cannot guarantee complete uniqueness'''
-    return int(str(int(hashlib.md5(string.encode('utf-8')).hexdigest(), 16))[0:7]) # This is 7 because enums seem to error above this value
-
-kitops_enum_cats = []
 def get_kitops_categories(self, context):
-    global kitops_enum_cats
-    kitops_enum_cats = []
-    option = addon.option()
+    option = kitops_addon.option()
+    return option.get_kitops_category_enum()
 
-    if len(option.kpack.categories):
-        for index, category in enumerate(option.kpack.categories):
-            if not option.filter or option.kpack.active_index == index or re.search(option.filter, category.name, re.I):
-                number = _convert_to_number(category.name)
-                kitops_enum_cats.append((category.name, category.name, '', category.blends[category.active_index].icon_id, number))
-
-    return kitops_enum_cats
-
-kitops_enum_items = []
 def get_kitops_items(self, context):
-    global kitops_enum_items
-    kitops_enum_items = []
-    option = addon.option()
-    for index, category in enumerate(option.kpack.categories):
-        if category.name == self.category:
-            if index < len(option.kpack.categories):
-                category = option.kpack.categories[index]
-                if getattr(category, 'folder', None ) is not None and category.folder in insert.thumbnails:
-                    image_items = insert.thumbnails[category.folder].images[:]
-                    # Change the index to an generated number from the image name...
-                    for i in range(len(image_items)):
-                        image_item = image_items[i]
-                        number = _convert_to_number(image_item[0])
-                        image_items[i] = (image_item[0], image_item[1], image_item[2], image_item[3], number)
-                    kitops_enum_items.extend(image_items)
-                    break
-
-    return kitops_enum_items
+    option = kitops_addon.option()
+    return option.get_kitops_insert_enum(self.category)
 
 def inserts_redo_all(self, context):
     """Run redo"""
@@ -129,16 +96,11 @@ def inserts_redo_update(self, context):
     return None
 
 def switch_categories(self, context):
-    self.error_message = ''
-    # kitops_update.kpack(None, context) TODO consider introducing this if there are issues with reloading KPACKS
-    option = addon.option()
-    for index, category in enumerate(option.kpack.categories):
-        if category.name == self.category:
-            if index < len(option.kpack.categories):
-                category = option.kpack.categories[index]
-                if category.folder in insert.thumbnails:
-                    self.insert_name = insert.thumbnails[category.folder].images[0][0]
-                return None
+    option = kitops_addon.option()
+    for cat in option.kpack.categories:
+        if cat.name == self.category and len(cat.blends):
+            self.insert_name = cat.blends[0].name
+            break
     return None
 
 class kitops_synth_insert_entry(PropertyGroup):
@@ -599,6 +561,20 @@ class kitops_synth_layer(PropertyGroup):
 class kitops_synth_message(PropertyGroup):
     text : StringProperty()
 
+_previous_layer_index = -1
+def update_selection(self, context):
+    if context.active_object:
+        global _previous_layer_index
+        layer_index = context.scene.kitopssynth.layer_index
+        bpy.ops.ko.synth_select_layer_faces('INVOKE_DEFAULT', layer_index=layer_index, previous_layer_index=_previous_layer_index)
+        _previous_layer_index = context.scene.kitopssynth.layer_index
+
+
+preview_types = [
+    ("WIREFRAME", "Wireframe", "", 0),
+    ("FAST", "Fast", "", 1)
+]
+
 class kitops_synth(PropertyGroup):
 
     is_initialized : BoolProperty(
@@ -619,7 +595,15 @@ class kitops_synth(PropertyGroup):
         update=inserts_redo_all
         )
 
-    layer_index : IntProperty(name = "Index for layers", default = 0)
+    preview_type : EnumProperty(
+        name = 'Preview Type',
+        description = 'Preview type',
+        items = preview_types,
+        default = "FAST",
+        update=inserts_redo_all
+    )
+
+    layer_index : IntProperty(name = "", default = 0, update=update_selection)
 
     edit_description : BoolProperty(
                         name = 'Edit Description Link',
@@ -647,6 +631,19 @@ class kitops_synth(PropertyGroup):
     layers : CollectionProperty(name='KIT OPS SYNTH Layers', type=kitops_synth_layer)
 
     messages : CollectionProperty(type=kitops_synth_message)
+
+    preview_color : FloatVectorProperty(name="Preview Mode Color",
+                                            subtype='COLOR',
+                                            size=4,
+                                            default=[0, 0, 0.8, 0.8],
+                                            min=0,
+                                            max = 1,
+                                            update=inserts_redo_update)
+
+class kitops_synth_insert(PropertyGroup):
+    is_preview_insert : BoolProperty(
+                        name = 'Is a preview INSERT',
+                        default=False)
 
 class kitops_synth_iterator(PropertyGroup):
 
@@ -682,7 +679,8 @@ classes = [synth_object_ref,
             kitops_placement, 
             kitops_synth_layer, 
             kitops_synth_message, 
-            kitops_synth, 
+            kitops_synth,
+            kitops_synth_insert, 
             synth_face_ref, 
             synth_layer_face_map, 
             kitops_synth_iterator]
@@ -694,11 +692,13 @@ def register():
 
     bpy.types.Scene.kitopssynth_target_obj = PointerProperty(name='Current selected target object for SYNTH', type=bpy.types.Object)
 
-    bpy.types.Object.kitopssynth_insert_map = CollectionProperty(name='KIT OPS SYNTH INSERT entries', type=synth_insert_map)
+    bpy.types.Object.kitopssynth_insert_map = CollectionProperty(name='KIT OPS SYNTH INSERTs associated with an object', type=synth_insert_map)
+
+    bpy.types.Object.kitopssynth_insert = PointerProperty(name='KIT OPS SYNTH specific INSERT properties', type=kitops_synth_insert)
+
+    bpy.types.Object.kitopssynth_layer_face_map = CollectionProperty(name='KIT OPS SYNTH Layer to Face Reference Map', type=synth_layer_face_map)
 
     bpy.types.Scene.kitopssynth = PointerProperty('KIT OPS SYNTH Scene properties', type=kitops_synth)
-
-    bpy.types.Scene.kitopssynth_layer_face_map = CollectionProperty(name='KIT OPS SYNTH Layer Face Map', type=synth_layer_face_map)
 
     bpy.types.Scene.kitopssynth_iterator = PointerProperty(name='SYNTH Iterator', type=kitops_synth_iterator)
 
@@ -709,8 +709,9 @@ def unregister():
         unregister_class(cls)
     
     del bpy.types.Scene.kitopssynth_iterator
-    del bpy.types.Scene.kitopssynth_layer_face_map
-    del bpy.types.Scene.kitopssynth    
+    del bpy.types.Scene.kitopssynth  
+    del bpy.types.Object.kitopssynth_layer_face_map
+    del bpy.types.Object.kitopssynth_insert
     del bpy.types.Object.kitopssynth_insert_map
     del bpy.types.Scene.kitopssynth_target_obj
     
